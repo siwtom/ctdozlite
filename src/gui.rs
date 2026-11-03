@@ -1684,6 +1684,7 @@ impl eframe::App for ZaloGuiApp {
 // ---------------------------------------------------------------------------
 
 impl ZaloGuiApp {
+    #[allow(dead_code)]
     fn handle_frameless_resize(ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
             return;
@@ -1732,6 +1733,7 @@ impl ZaloGuiApp {
         }
     }
 
+    #[allow(dead_code)]
     fn render_custom_title_bar(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         let total_unread: usize = self.unread_counts.values().sum();

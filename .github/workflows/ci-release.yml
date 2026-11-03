@@ -304,7 +304,7 @@ jobs:
           fi
           cargo apk build --release --lib
           mkdir -p dist
-          cp target/release/apk/*.apk dist/ctdozlite-0.0.1-android-arm64.apk
+          cp target/release/apk/zalo_rust.apk dist/ctdozlite-0.0.1-android-arm64.apk
       - uses: actions/upload-artifact@v4
         with:
           name: ctdozlite-android-apk
