@@ -6,13 +6,19 @@ impl ZaloGuiApp {
         // -------------------------------------------------------------------
         let screen_rect = ctx.screen_rect();
         let screen_w = screen_rect.width();
-        let is_compact_w = screen_w < 780.0;
-        let is_narrow_w = screen_w < 620.0;
-        let left_rail_w = if is_narrow_w { 52.0 } else { 62.0 };
+        let is_mobile_layout = cfg!(any(target_os = "android", target_os = "ios"))
+            || self.mobile_view_mode
+            || screen_w < 540.0;
+        let is_compact_w = screen_w < 780.0 || is_mobile_layout;
+        let is_narrow_w = !is_mobile_layout && screen_w < 620.0;
+        let left_rail_w = if is_mobile_layout { 54.0 } else if is_narrow_w { 52.0 } else { 62.0 };
+        let mut pending_switch_slot: Option<usize> = None;
+        let mut pending_add_slot = false;
 
         // -------------------------------------------------------------------
-        // 1. LEFT NAVIGATION RAIL (Replaces top bar & bottom bar)
+        // 1. LEFT NAVIGATION RAIL (Hidden when inside full-screen Mobile Chat Room)
         // -------------------------------------------------------------------
+        if !(is_mobile_layout && self.mobile_chat_open) {
         egui::SidePanel::left("left_nav_rail")
             .resizable(false)
             .exact_width(left_rail_w)
@@ -59,7 +65,7 @@ impl ZaloGuiApp {
                     if av_resp
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .on_hover_text(format!(
-                            "{} (Đang trực tuyến — Bấm để mở menu tài khoản)",
+                            "{} (Đang trực tuyến — Bấm để mở menu & chuyển tài khoản)",
                             if self.user_name.is_empty() {
                                 "Tài khoản Zalo"
                             } else {
@@ -71,7 +77,122 @@ impl ZaloGuiApp {
                         self.profile_menu_open = !self.profile_menu_open;
                     }
 
-                    ui.add_space(18.0);
+                    // Multi-Account Secondary Avatar Stack + `+` Add Account Button
+                    if !self.background_accounts.is_empty() {
+                        ui.add_space(6.0);
+                        let bg_summary: Vec<(usize, String, Option<String>, bool, usize)> = self
+                            .background_accounts
+                            .iter()
+                            .map(|b| {
+                                let u_cnt: usize = b.unread_counts.values().sum();
+                                let nm = if !b.user_name.is_empty() {
+                                    b.user_name.clone()
+                                } else {
+                                    format!("TK #{}", b.slot_id + 1)
+                                };
+                                (b.slot_id, nm, b.user_avatar.clone(), b.is_logged_in, u_cnt)
+                            })
+                            .collect();
+
+                        for (slot_id, bg_name, bg_ava, bg_logged, bg_unread) in bg_summary {
+                            let (b_rect, b_resp) =
+                                ui.allocate_exact_size(Vec2::new(34.0, 34.0), Sense::click());
+                            paint_user_avatar(
+                                ui.painter(),
+                                b_rect.center(),
+                                15.0,
+                                &bg_name,
+                                false,
+                                bg_ava.as_deref(),
+                                &self.sticker_textures,
+                                &mut self.loading_stickers,
+                            );
+                            if b_resp.hovered() {
+                                ui.painter().circle_stroke(
+                                    b_rect.center(),
+                                    16.0,
+                                    Stroke::new(1.8_f32, pal.primary_hover),
+                                );
+                            }
+                            let dot_c = Pos2::new(b_rect.right() - 4.0, b_rect.bottom() - 4.0);
+                            ui.painter().circle_filled(dot_c, 5.2, pal.bg_app);
+                            ui.painter().circle_filled(
+                                dot_c,
+                                3.5,
+                                if bg_logged {
+                                    pal.accent_online
+                                } else {
+                                    pal.warning
+                                },
+                            );
+                            if bg_unread > 0 {
+                                let b_pos = Pos2::new(b_rect.right() - 4.0, b_rect.top() + 5.0);
+                                ui.painter().circle_filled(b_pos, 7.5, pal.danger);
+                                ui.painter().text(
+                                    b_pos,
+                                    egui::Align2::CENTER_CENTER,
+                                    if bg_unread > 9 {
+                                        "9+".to_string()
+                                    } else {
+                                        bg_unread.to_string()
+                                    },
+                                    FontId::proportional(8.8),
+                                    Color32::WHITE,
+                                );
+                            }
+                            if b_resp
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .on_hover_text(format!(
+                                    "Chuyển sang {bg_name} ({}) — Bấm để đổi ngay (0ms)",
+                                    if bg_unread > 0 {
+                                        format!("{bg_unread} tin chưa đọc")
+                                    } else if bg_logged {
+                                        "Đang trực tuyến".to_string()
+                                    } else {
+                                        "Chưa đăng nhập".to_string()
+                                    }
+                                ))
+                                .clicked()
+                            {
+                                pending_switch_slot = Some(slot_id);
+                            }
+                            ui.add_space(3.0);
+                        }
+                    }
+
+                    // Compact `+` Button to add a 2nd parallel Zalo account
+                    ui.add_space(4.0);
+                    let (plus_r, plus_resp) =
+                        ui.allocate_exact_size(Vec2::new(28.0, 22.0), Sense::click());
+                    ui.painter().rect_filled(
+                        plus_r,
+                        Rounding::same(6.0),
+                        if plus_resp.hovered() {
+                            pal.primary.linear_multiply(0.24)
+                        } else {
+                            pal.bg_elevated
+                        },
+                    );
+                    ui.painter().text(
+                        plus_r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "+ TK",
+                        FontId::proportional(9.8),
+                        if plus_resp.hovered() {
+                            pal.primary_hover
+                        } else {
+                            pal.text_secondary
+                        },
+                    );
+                    if plus_resp
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Thêm tài khoản Zalo thứ 2 chạy song song trên cùng ứng dụng")
+                        .clicked()
+                    {
+                        pending_add_slot = true;
+                    }
+
+                    ui.add_space(12.0);
 
                     // Navigation Icon 1: Tin nhắn (All / Active Chat)
                     let is_msg_nav = self.thread_filter == ThreadFilter::All;
@@ -288,18 +409,32 @@ impl ZaloGuiApp {
                     }
                 });
             });
+        }
+
+        if let Some(target_slot) = pending_switch_slot {
+            self.switch_to_account(target_slot);
+        }
+        if pending_add_slot {
+            self.add_new_account_slot(ctx);
+        }
 
         // -------------------------------------------------------------------
-        // 2. CONVERSATION LIST SIDEBAR (Responsive width, auto-adapts on resize)
+        // 2. CONVERSATION LIST SIDEBAR (Full-width in Mobile List mode, hidden in Mobile Chat Room)
         // -------------------------------------------------------------------
-        let sidebar_default_w = if is_narrow_w {
+        if !(is_mobile_layout && self.mobile_chat_open) {
+        let mobile_list_w = (screen_w - left_rail_w).max(240.0);
+        let sidebar_default_w = if is_mobile_layout {
+            mobile_list_w
+        } else if is_narrow_w {
             76.0
         } else if is_compact_w {
             240.0
         } else {
             300.0
         };
-        let (sidebar_id, sidebar_min_w, sidebar_max_w) = if is_narrow_w {
+        let (sidebar_id, sidebar_min_w, sidebar_max_w) = if is_mobile_layout {
+            ("conversation_sidebar_mobile", mobile_list_w, mobile_list_w)
+        } else if is_narrow_w {
             ("conversation_sidebar_narrow", 68.0, 68.0)
         } else {
             (
@@ -310,7 +445,7 @@ impl ZaloGuiApp {
         };
 
         egui::SidePanel::left(sidebar_id)
-            .resizable(!is_narrow_w)
+            .resizable(!is_narrow_w && !is_mobile_layout)
             .default_width(sidebar_default_w)
             .width_range(sidebar_min_w..=sidebar_max_w)
             .frame(
@@ -1022,6 +1157,9 @@ impl ZaloGuiApp {
                     self.in_chat_search_open = true;
                     self.in_chat_search_focus_pending = true;
                     self.in_chat_search_query = q_str;
+                    if is_mobile_layout {
+                        self.mobile_chat_open = true;
+                    }
                 }
                 if let Some((idx, tid, is_group)) = clicked_thread {
                     if self.selected_thread_index != idx {
@@ -1029,8 +1167,11 @@ impl ZaloGuiApp {
                         self.filter_starred_only = false;
                     }
                     self.selected_thread_index = idx;
+                    if is_mobile_layout {
+                        self.mobile_chat_open = true;
+                    }
                     if self.unread_counts.remove(&tid).is_some() {
-                        let total_unread: usize = self.unread_counts.values().sum();
+                        let total_unread: usize = self.total_unread_all_accounts();
                         let title = if total_unread > 0 {
                             format!("({total_unread}) Zalo Lite — Native Rust Client")
                         } else {
@@ -1053,6 +1194,7 @@ impl ZaloGuiApp {
                     }
                 }
             });
+        }
 
         // Extract lightweight metadata for Header, Right Info Drawer, and Central Chat Stream
         let thread_meta = self.threads.get(self.selected_thread_index).map(|t| {
@@ -1065,10 +1207,26 @@ impl ZaloGuiApp {
             )
         });
 
+        // In Mobile 1-Column Master-Detail mode, when the Conversation List is active,
+        // hide the Chat Detail panel and Info Drawer completely.
+        if is_mobile_layout && !self.mobile_chat_open {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(pal.bg_sidebar))
+                .show(ctx, |_ui| {});
+            self.render_profile_popover(ctx, pal);
+            self.render_toast_overlay(ctx, pal);
+            self.render_forward_dialog(ctx, pal);
+            self.render_call_overlay(ctx, pal);
+            self.render_image_viewer_modal(ctx, pal);
+            self.render_phone_lookup_modal(ctx, pal);
+            self.render_settings_modal(ctx, pal);
+            return;
+        }
+
         // -------------------------------------------------------------------
         // 3. COLLAPSIBLE RIGHT CONVERSATION INFO DRAWER (responsive width)
         // -------------------------------------------------------------------
-        let show_info_drawer = self.info_drawer_open && !is_compact_w;
+        let show_info_drawer = self.info_drawer_open && !is_compact_w && !is_mobile_layout;
         let drawer_w = (screen_w * 0.26).clamp(240.0, 310.0);
 
         if show_info_drawer {
@@ -1467,13 +1625,42 @@ impl ZaloGuiApp {
                             .copied()
                             .unwrap_or(crate::chat::FriendshipStatus::Unknown)
                     };
-                    // 1. Clean Conversation Header Bar (No raw 19-digit ID, no bulky sync button)
+                    // 1. Clean Conversation Header Bar (With Mobile `←` Back Button on touch/narrow screens)
                     egui::Frame::none()
                         .fill(pal.bg_sidebar)
-                        .inner_margin(Margin::symmetric(18.0, 11.0))
+                        .inner_margin(Margin::symmetric(if is_mobile_layout { 10.0 } else { 18.0 }, 11.0))
                         .stroke(Stroke::new(1.0_f32, pal.border))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                if is_mobile_layout {
+                                    let (back_rect, back_resp) = ui.allocate_exact_size(
+                                        Vec2::new(34.0, 38.0),
+                                        Sense::click(),
+                                    );
+                                    if back_resp.hovered() {
+                                        ui.painter().rect_filled(
+                                            back_rect,
+                                            Rounding::same(8.0),
+                                            pal.bg_hover,
+                                        );
+                                    }
+                                    ui.painter().text(
+                                        back_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "←",
+                                        FontId::proportional(20.0),
+                                        pal.primary_hover,
+                                    );
+                                    if back_resp
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text("Quay lại danh sách hội thoại")
+                                        .clicked()
+                                    {
+                                        self.mobile_chat_open = false;
+                                    }
+                                    ui.add_space(2.0);
+                                }
+
                                 // Header Avatar (40x40) with Cutout Online Dot
                                 let (av_rect, _) =
                                     ui.allocate_exact_size(Vec2::new(40.0, 40.0), Sense::hover());

@@ -14,6 +14,7 @@ mod logger;
 mod login;
 mod media;
 mod param_cipher;
+mod paths;
 mod qr;
 mod session;
 mod socket;
@@ -39,14 +40,15 @@ async fn main() -> Result<()> {
     let dump_raw = args.iter().any(|a| a == "--dump-raw");
     let force_tui = args.iter().any(|a| a == "--tui");
     let force_gui = args.iter().any(|a| a == "--gui");
+    let force_mobile = args.iter().any(|a| a == "--mobile");
     let force_qr = args.iter().any(|a| a == "--qr");
     let force_logout = args.iter().any(|a| a == "--logout");
 
     if force_logout {
-        let _ = std::fs::remove_file("session.json");
-        let _ = std::fs::remove_file("threads_cache.json");
+        let _ = std::fs::remove_file(paths::session_file_for_slot(0));
+        let _ = std::fs::remove_file(paths::threads_cache_for_slot(0));
         println!("✓ Đã đăng xuất và xóa phiên lưu trữ cũ (session.json, threads_cache.json).");
-        if !force_gui && !force_tui && !force_qr {
+        if !force_gui && !force_tui && !force_qr && !force_mobile {
             return Ok(());
         }
     }
@@ -63,7 +65,8 @@ async fn main() -> Result<()> {
 
     // Attempt to restore persistent session from disk
     let session_restored = if !force_logout {
-        if let Ok(_) = s.load_from_file("session.json") {
+        let sess_path = s.session_file_path();
+        if let Ok(_) = s.load_from_file(&sess_path) {
             if let Some(li) = &s.login {
                 let name = if li.display_name.is_empty() { "Zalo User" } else { &li.display_name };
                 println!("✓ Đã khôi phục phiên từ session.json: {name} (UIN: {})", li.uin);
@@ -82,7 +85,7 @@ async fn main() -> Result<()> {
     // If `--gui` is specified (or default when not `--tui` / `--qr` / `--phone`):
     // Open the native GUI window IMMEDIATELY without blocking on network requests!
     // Background worker in `gui.rs` handles `get_server_info`, `get_friends`, and `poll_new_messages`.
-    if force_gui || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone"))) {
+    if force_gui || force_mobile || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone"))) {
         println!("🚀 Đang khởi chạy giao diện đồ họa Zalo GUI (egui)…");
         #[cfg(target_os = "windows")]
         if !dev_mode {
@@ -101,10 +104,15 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        let initial_size = if force_mobile {
+            [412.0, 820.0]
+        } else {
+            [1020.0, 700.0]
+        };
         let mut viewport = eframe::egui::ViewportBuilder::default()
             .with_decorations(false)
-            .with_inner_size([1020.0, 700.0])
-            .with_min_inner_size([480.0, 360.0])
+            .with_inner_size(initial_size)
+            .with_min_inner_size([360.0, 360.0])
             .with_title("Zalo");
         if let Some(icon) = gui::load_app_icon() {
             viewport = viewport.with_icon(std::sync::Arc::new(icon));
@@ -114,15 +122,19 @@ async fn main() -> Result<()> {
             ..Default::default()
         };
 
-        let mut initial_threads = chat::load_threads_cache();
-        store::load_history_into_threads("zalo_history.db", &mut initial_threads, 200);
+        let mut initial_threads = chat::load_threads_cache_for_slot(0);
+        store::load_history_into_threads(&s.history_db_path(), &mut initial_threads, 200);
 
         let app_session = s;
         return eframe::run_native(
             "Zalo - Rust Native Client",
             native_options,
             Box::new(move |cc| {
-                Ok(Box::new(gui::ZaloGuiApp::new(cc, app_session, dev_mode, initial_threads)))
+                let mut app = gui::ZaloGuiApp::new(cc, app_session, dev_mode, initial_threads);
+                if force_mobile {
+                    app.mobile_view_mode = true;
+                }
+                Ok(Box::new(app))
             }),
         )
         .map_err(|e| anyhow::anyhow!("Không thể khởi chạy GUI: {e}"));
@@ -147,8 +159,8 @@ async fn main() -> Result<()> {
             true
         } else {
             println!("⚠️ Phiên đăng nhập trong session.json đã hết hạn. Đang chuyển sang đăng nhập mới…");
-            let _ = std::fs::remove_file("session.json");
-            let _ = std::fs::remove_file("threads_cache.json");
+            let _ = std::fs::remove_file(paths::session_file_for_slot(0));
+            let _ = std::fs::remove_file(paths::threads_cache_for_slot(0));
             s.logout();
             false
         }
@@ -195,8 +207,8 @@ async fn main() -> Result<()> {
     }
 
     // Fetch initial threads and hydrate with local SQLite history
-    let mut initial_threads = chat::load_threads_cache();
-    store::load_history_into_threads("zalo_history.db", &mut initial_threads, 200);
+    let mut initial_threads = chat::load_threads_cache_for_slot(0);
+    store::load_history_into_threads(&s.history_db_path(), &mut initial_threads, 200);
     if s.login.is_some() {
         match chat::get_friends(&s).await {
             Ok(list) => {

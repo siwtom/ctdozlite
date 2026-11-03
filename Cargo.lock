@@ -713,6 +713,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-tungstenite",
+ "winit",
 ]
 
 [[package]]

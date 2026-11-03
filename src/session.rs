@@ -154,6 +154,8 @@ pub struct Session {
     pub session_key: Option<String>,
     pub zpw_sek: Option<String>,
     pub login: Option<LoginInfo>,
+    /// Multi-account profile slot (`0` = primary account, `>= 1` = secondary accounts).
+    pub profile_slot: usize,
     /// Draw commands in front of the user so they can be reproduced by hand.
     pub verbose: bool,
     /// Append every exchange (pretty-printed) to `dump/<n>-<slug>.json`.
@@ -164,6 +166,10 @@ pub struct Session {
 
 impl Session {
     pub fn new(verbose: bool, dump: bool, dump_raw: bool) -> Result<Self> {
+        Self::new_for_slot(0, verbose, dump, dump_raw)
+    }
+
+    pub fn new_for_slot(profile_slot: usize, verbose: bool, dump: bool, dump_raw: bool) -> Result<Self> {
         let jar = Arc::new(Jar::default());
         let mut default_headers = HeaderMap::new();
         default_headers.insert(
@@ -194,10 +200,23 @@ impl Session {
             session_key: None,
             zpw_sek: None,
             login: None,
+            profile_slot,
             verbose,
             dump,
             dump_raw,
         })
+    }
+
+    pub fn session_file_path(&self) -> String {
+        crate::paths::session_file_for_slot(self.profile_slot)
+    }
+
+    pub fn threads_cache_path(&self) -> String {
+        crate::paths::threads_cache_for_slot(self.profile_slot)
+    }
+
+    pub fn history_db_path(&self) -> String {
+        crate::paths::history_db_for_slot(self.profile_slot)
     }
 
     /// Store `zpw_sek` session token, attach it to `self.login`, and insert the session cookie.

@@ -529,13 +529,17 @@ pub(super) fn setup_custom_fonts(ctx: &egui::Context) {
         egui::FontData::from_static(LUCIDE_BYTES),
     );
 
-    // 2. Load system Vietnamese sans-serif font
+    // 2. Load system Vietnamese sans-serif font (Windows, macOS, Linux, Android, iOS)
     let font_candidates = [
         "C:\\Windows\\Fonts\\segoeui.ttf",
         "C:\\Windows\\Fonts\\arial.ttf",
         "C:\\Windows\\Fonts\\tahoma.ttf",
+        "/system/fonts/Roboto-Regular.ttf",
+        "/system/fonts/NotoSans-Regular.ttf",
+        "/system/fonts/DroidSans.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Supplemental/Tahoma.ttf",
+        "/System/Library/Fonts/Core/Arial.ttf",
         "/Library/Fonts/Arial.ttf",
         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/noto/NotoSans-Regular.ttf",

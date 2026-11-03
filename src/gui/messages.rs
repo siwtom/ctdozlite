@@ -296,7 +296,18 @@ pub(super) fn open_external_url(url: &str) {
     {
         let _ = std::process::Command::new("open").arg(trimmed).spawn();
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        let _ = std::process::Command::new("am")
+            .args(["start", "-a", "android.intent.action.VIEW", "-d", trimmed])
+            .spawn();
+    }
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "macos"),
+        not(target_os = "android"),
+        not(target_os = "ios")
+    ))]
     {
         let _ = std::process::Command::new("xdg-open").arg(trimmed).spawn();
     }
@@ -359,7 +370,12 @@ pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::Pa
         }
         None
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "macos"),
+        not(target_os = "android"),
+        not(target_os = "ios")
+    ))]
     {
         let mut zcmd = std::process::Command::new("zenity");
         zcmd.arg("--file-selection");
@@ -385,6 +401,11 @@ pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::Pa
                 }
             }
         }
+        None
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = images_only;
         None
     }
 }
@@ -440,12 +461,12 @@ pub(super) fn finalize_clipboard_rgba_image(
     if width == 0 || height == 0 {
         return None;
     }
-    let _ = std::fs::create_dir_all("stickers_cache");
+    let cache_dir = crate::paths::stickers_cache_dir();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let path = std::path::PathBuf::from(format!("stickers_cache/clipboard_{now_ms}.png"));
+    let path = cache_dir.join(format!("clipboard_{now_ms}.png"));
     rgba.save(&path).ok()?;
 
     let thumb = if width > 240 || height > 240 {
@@ -652,7 +673,11 @@ pub(super) fn read_clipboard_image_to_png() -> Option<(std::path::PathBuf, u32, 
             None
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "android"),
+        not(target_os = "ios")
+    ))]
     {
         // Wayland (`wl-paste --type image/png`) or X11 (`xclip -selection clipboard -t image/png -o`)
         for (prog, args) in [
@@ -670,6 +695,10 @@ pub(super) fn read_clipboard_image_to_png() -> Option<(std::path::PathBuf, u32, 
                 }
             }
         }
+        None
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
         None
     }
 }

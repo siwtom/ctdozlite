@@ -12,6 +12,11 @@ impl ZaloGuiApp {
 
         let mut close_menu = false;
         let mut do_logout = false;
+        let mut switch_to_slot: Option<usize> = None;
+        let mut add_new_slot = false;
+        let mut remove_slot: Option<usize> = None;
+        let accounts_summary = self.all_accounts_summary();
+
         let area_resp = egui::Area::new(Id::new("left_rail_profile_popover"))
             .order(egui::Order::Foreground)
             .fixed_pos(Pos2::new(68.0, 44.0))
@@ -22,7 +27,7 @@ impl ZaloGuiApp {
                     .rounding(Rounding::same(12.0))
                     .inner_margin(Margin::same(10.0))
                     .show(ui, |ui| {
-                        ui.set_width(220.0);
+                        ui.set_width(240.0);
                         let display_user = if self.user_name.is_empty() {
                             "Người dùng Zalo"
                         } else {
@@ -39,9 +44,12 @@ impl ZaloGuiApp {
                             ui.painter()
                                 .circle_filled(dr.center(), 3.8, pal.accent_online);
                             ui.label(
-                                RichText::new("Đang hoạt động")
-                                    .size(11.5)
-                                    .color(pal.text_secondary),
+                                RichText::new(format!(
+                                    "Đang hoạt động (TK #{})",
+                                    self.active_account_slot + 1
+                                ))
+                                .size(11.5)
+                                .color(pal.text_secondary),
                             );
                         });
                         if !self.user_uin.is_empty() {
@@ -50,6 +58,103 @@ impl ZaloGuiApp {
                                     .size(10.5)
                                     .color(pal.text_muted),
                             );
+                        }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Multi-Account Switcher Section
+                        ui.label(
+                            RichText::new(format!(
+                                "TÀI KHOẢN SONG SONG ({})",
+                                accounts_summary.len()
+                            ))
+                            .size(10.2)
+                            .color(pal.text_muted)
+                            .strong(),
+                        );
+                        ui.add_space(3.0);
+                        for (slot_id, acc_name, _ava, logged_in, unread_n, is_active) in
+                            &accounts_summary
+                        {
+                            ui.horizontal(|ui| {
+                                let status_dot = if *logged_in { "●" } else { "○" };
+                                let badge_str = if *unread_n > 0 {
+                                    format!("{status_dot}  {acc_name} ({unread_n} mới)")
+                                } else {
+                                    format!("{status_dot}  {acc_name}")
+                                };
+                                let row_w = if *slot_id > 0 { 196.0 } else { 228.0 };
+                                let btn = egui::Button::new(
+                                    RichText::new(badge_str)
+                                        .size(12.0)
+                                        .color(if *is_active {
+                                            Color32::WHITE
+                                        } else {
+                                            pal.text_primary
+                                        })
+                                        .strong(),
+                                )
+                                .fill(if *is_active {
+                                    pal.primary
+                                } else {
+                                    pal.bg_input
+                                })
+                                .rounding(Rounding::same(7.0))
+                                .min_size(Vec2::new(row_w, 28.0));
+
+                                if ui
+                                    .add(btn)
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .clicked()
+                                    && !*is_active
+                                {
+                                    switch_to_slot = Some(*slot_id);
+                                    close_menu = true;
+                                }
+                                if *slot_id > 0 {
+                                    let del_b = egui::Button::new(
+                                        RichText::new(lucide::X).size(11.0).color(pal.danger),
+                                    )
+                                    .fill(pal.danger.linear_multiply(0.12))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(26.0, 28.0));
+                                    if ui
+                                        .add(del_b)
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text("Xóa hồ sơ tài khoản phụ này")
+                                        .clicked()
+                                    {
+                                        remove_slot = Some(*slot_id);
+                                        close_menu = true;
+                                    }
+                                }
+                            });
+                        }
+
+                        ui.add_space(3.0);
+                        if ui
+                            .add_sized(
+                                [228.0, 29.0],
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "{}  + Thêm tài khoản thứ 2 (Song song)",
+                                        lucide::USER_PLUS
+                                    ))
+                                    .size(12.0)
+                                    .color(pal.primary_hover)
+                                    .strong(),
+                                )
+                                .fill(pal.primary.linear_multiply(0.12))
+                                .stroke(Stroke::new(1.0_f32, pal.primary.linear_multiply(0.5)))
+                                .rounding(Rounding::same(7.0)),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            add_new_slot = true;
+                            close_menu = true;
                         }
 
                         ui.add_space(6.0);
@@ -189,12 +294,25 @@ impl ZaloGuiApp {
             self.login_status_msg.clear();
             self.qr_status = "Đang xin mã QR mới…".into();
             self.status_msg = "Đã đăng xuất".into();
-            let _ = std::fs::remove_file("session.json");
-            let _ = std::fs::remove_file("threads_cache.json");
+            let _ = std::fs::remove_file(crate::paths::session_file_for_slot(
+                self.active_account_slot,
+            ));
+            let _ = std::fs::remove_file(crate::paths::threads_cache_for_slot(
+                self.active_account_slot,
+            ));
             if let Some(tx) = WORKER_TX.get() {
                 let _ = tx.send(WorkerCmd::Logout);
                 let _ = tx.send(WorkerCmd::RequestQr);
             }
+        }
+        if let Some(slot_id) = switch_to_slot {
+            self.switch_to_account(slot_id);
+        }
+        if add_new_slot {
+            self.add_new_account_slot(ctx);
+        }
+        if let Some(rm_slot) = remove_slot {
+            self.remove_account_slot(rm_slot);
         }
         if close_menu {
             self.profile_menu_open = false;

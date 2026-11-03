@@ -1,4 +1,4 @@
-name: CI & Cross-Platform Release (.deb / .rpm / .AppImage / .tar.gz / .exe / .dmg)
+name: CI & Cross-Platform Release (.deb / .rpm / .AppImage / .tar.gz / .exe / .dmg / .ipa / .apk)
 
 on:
   push:
@@ -242,9 +242,69 @@ jobs:
           name: ctdozlite-macos-dmg
           path: dist/*.dmg
 
+  # 5. iOS .ipa package built on macos-latest (Xcode iphoneos SDK, aarch64-apple-ios)
+  # Ready to sideload via AltStore, SideStore, Sideloadly, TrollStore, ESign, or Feather
+  ios-ipa:
+    name: iOS (ARM64 .ipa for AltStore / Sideloadly / TrollStore)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-aarch64
+      - name: Install CMake & build tools
+        run: brew install cmake pkg-config ldid
+      - name: Build iOS .ipa bundle (aarch64-apple-ios)
+        run: |
+          chmod +x packaging/ios/build_ipa.sh
+          ./packaging/ios/build_ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctdozlite-ios-ipa
+          path: dist/*.ipa
+
+  # 6. Android .apk package built on Ubuntu 22.04 with Android SDK/NDK (aarch64-linux-android)
+  android-apk:
+    name: Android (ARM64 .apk)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64
+      - name: Install CMake, Ninja & cargo-apk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config
+          cargo install cargo-apk --locked
+      - name: Build Android .apk (aarch64-linux-android)
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          CMAKE_ANDROID_NDK: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          CMAKE_ANDROID_ARCH_ABI: arm64-v8a
+          LIBOPUS_STATIC: "1"
+          LIBOPUS_NO_PKG: "1"
+        run: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          cargo apk build --release --lib
+          mkdir -p dist
+          cp target/release/apk/*.apk dist/ctdozlite-0.0.1-android-arm64.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctdozlite-android-apk
+          path: dist/*.apk
+
   release:
     name: Publish GitHub Release
-    needs: [linux-packages, linux-legacy-glibc231, windows-exe, macos-dmg]
+    needs: [linux-packages, linux-legacy-glibc231, windows-exe, macos-dmg, ios-ipa, android-apk]
     if: always() && startsWith(github.ref, 'refs/tags/v') && needs.linux-packages.result == 'success' && needs.windows-exe.result == 'success' && needs.macos-dmg.result == 'success'
     runs-on: ubuntu-latest
     steps:
@@ -296,3 +356,7 @@ jobs:
 
             #### 🍎 Bản cài đặt cho macOS
             - `ctdozlite-0.0.1-macos.dmg`
+
+            #### 📱 Bản cài đặt cho iOS & Android (Multi-Account + Mobile Touch UI)
+            - **iOS (`.ipa` cho iPhone / iPad — iOS 15.0+):** `ctdozlite-0.0.1-ios-arm64.ipa` (Cài đặt qua Sideloadly, AltStore, SideStore, TrollStore hoặc ESign/Feather)
+            - **Android (`.apk` ARM64 — Android 8.0+):** `ctdozlite-0.0.1-android-arm64.apk`

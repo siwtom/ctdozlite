@@ -264,7 +264,7 @@ impl Default for AppSettings {
 
 impl AppSettings {
     fn load() -> Self {
-        std::fs::read_to_string("app_settings.json")
+        std::fs::read_to_string(crate::paths::app_settings_file())
             .ok()
             .and_then(|s| serde_json::from_str::<Self>(&s).ok())
             .unwrap_or_default()
@@ -272,9 +272,31 @@ impl AppSettings {
 
     fn save(&self) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write("app_settings.json", json);
+            let _ = std::fs::write(crate::paths::app_settings_file(), json);
         }
     }
+}
+
+/// Independent runtime state for each parallel Zalo account slot (`0`, `1`, `2`, ...).
+pub(super) struct AccountRuntimeSlot {
+    pub(super) slot_id: usize,
+    pub(super) is_logged_in: bool,
+    pub(super) user_name: String,
+    pub(super) user_uin: String,
+    pub(super) user_avatar: Option<String>,
+    pub(super) threads: Vec<Thread>,
+    pub(super) selected_thread_index: usize,
+    pub(super) unread_counts: HashMap<String, usize>,
+    pub(super) friend_status_map: HashMap<String, crate::chat::FriendshipStatus>,
+    pub(super) checking_friend_status: HashSet<String>,
+    pub(super) qr_texture: Option<TextureHandle>,
+    pub(super) qr_status: String,
+    pub(super) login_in_progress: bool,
+    pub(super) login_status_msg: String,
+    pub(super) status_msg: String,
+    pub(super) event_rx: Receiver<GuiEvent>,
+    pub(super) event_tx: Sender<GuiEvent>,
+    pub(super) worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
 }
 
 
@@ -372,10 +394,17 @@ pub struct ZaloGuiApp {
     selected_log: Option<LogEntry>,
     scanner_findings: Vec<ScanFinding>,
 
-    // Background channels
+    // Background channels (active account slot)
     event_rx: Receiver<GuiEvent>,
     #[allow(dead_code)]
     event_tx: Sender<GuiEvent>,
+    active_account_slot: usize,
+    active_worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
+    background_accounts: Vec<AccountRuntimeSlot>,
+
+    // Mobile responsive touch mode (1-column Master-Detail navigation)
+    pub mobile_view_mode: bool,
+    pub mobile_chat_open: bool,
 
     // Background poll trigger
     last_poll: std::time::Instant,
@@ -457,9 +486,13 @@ impl ZaloGuiApp {
             }
         }
         crate::chat::deduplicate_threads(&mut threads, None);
-        crate::store::load_history_into_threads("zalo_history.db", &mut threads, 200);
+        crate::store::load_history_into_threads(
+            &crate::paths::history_db_for_slot(0),
+            &mut threads,
+            200,
+        );
         crate::chat::deduplicate_threads(&mut threads, None);
-        crate::chat::save_threads_cache(&threads);
+        crate::chat::save_threads_cache_for_slot(0, &threads);
 
         let selected_thread_index = threads
             .iter()
@@ -468,7 +501,27 @@ impl ZaloGuiApp {
             .map(|(idx, _)| idx)
             .unwrap_or(0);
 
-        let app = Self {
+        let active_worker_tx = spawn_session_worker(session, tx.clone(), cc.egui_ctx.clone());
+
+        if is_logged_in {
+            let _ = active_worker_tx.send(WorkerCmd::RefreshThreads);
+        } else {
+            let _ = active_worker_tx.send(WorkerCmd::RequestQr);
+        }
+
+        // Restore any secondary accounts (`slot_id >= 1`) from `accounts_index.json`
+        let acc_index = crate::paths::load_accounts_index();
+        let mut background_accounts = Vec::new();
+        for &slot_id in &acc_index.slots {
+            if slot_id == 0 {
+                continue;
+            }
+            background_accounts.push(Self::spawn_account_slot(slot_id, dev_mode, &cc.egui_ctx));
+        }
+
+        let is_mobile_os = cfg!(any(target_os = "android", target_os = "ios"));
+
+        let mut app = Self {
             dark_mode,
             theme_dirty: false,
             is_logged_in,
@@ -494,7 +547,7 @@ impl ZaloGuiApp {
             active_call: None,
             image_viewer: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
-            info_drawer_open: true,
+            info_drawer_open: !is_mobile_os,
             profile_menu_open: false,
             toast_notice: None,
             phone_modal_open: false,
@@ -553,18 +606,17 @@ impl ZaloGuiApp {
             selected_log: None,
             scanner_findings: Vec::new(),
             event_rx: rx,
-            event_tx: tx.clone(),
+            event_tx: tx,
+            active_account_slot: 0,
+            active_worker_tx,
+            background_accounts,
+            mobile_view_mode: is_mobile_os,
+            mobile_chat_open: false,
             last_poll: std::time::Instant::now(),
         };
 
-        spawn_session_worker(session, tx, cc.egui_ctx.clone());
-
-        if let Some(wtx) = WORKER_TX.get() {
-            if is_logged_in {
-                let _ = wtx.send(WorkerCmd::RefreshThreads);
-            } else {
-                let _ = wtx.send(WorkerCmd::RequestQr);
-            }
+        if acc_index.active_slot != 0 {
+            app.switch_to_account(acc_index.active_slot);
         }
 
         app
@@ -582,6 +634,389 @@ impl ZaloGuiApp {
         let snapshot = self.threads.clone();
         if let Some(wtx) = WORKER_TX.get() {
             let _ = wtx.send(WorkerCmd::PersistThreads(snapshot));
+        }
+    }
+
+    pub(super) fn spawn_account_slot(
+        slot_id: usize,
+        dev_mode: bool,
+        ctx: &egui::Context,
+    ) -> AccountRuntimeSlot {
+        let mut s = Session::new_for_slot(slot_id, dev_mode, false, false)
+            .unwrap_or_else(|_| panic!("Failed to create Session for slot {slot_id}"));
+        let _ = s.load_from_file(&crate::paths::session_file_for_slot(slot_id));
+        let is_logged_in = s.login.is_some();
+        let (user_name, user_uin, user_avatar) = s
+            .login
+            .as_ref()
+            .map(|l| {
+                (
+                    l.display_name.clone(),
+                    l.uin.clone(),
+                    if l.avatar.is_empty() {
+                        None
+                    } else {
+                        Some(l.avatar.clone())
+                    },
+                )
+            })
+            .unwrap_or_default();
+
+        let mut threads = crate::chat::load_threads_cache_for_slot(slot_id);
+        if let Some(li) = s.login.as_ref() {
+            if !li.send2me_id.is_empty() {
+                for t in threads.iter_mut() {
+                    if !t.is_group && t.name.contains("Cloud của tôi") {
+                        t.id = li.send2me_id.clone();
+                    }
+                }
+            }
+        }
+        crate::chat::deduplicate_threads(&mut threads, None);
+        crate::store::load_history_into_threads(
+            &crate::paths::history_db_for_slot(slot_id),
+            &mut threads,
+            200,
+        );
+        crate::chat::deduplicate_threads(&mut threads, None);
+        crate::chat::save_threads_cache_for_slot(slot_id, &threads);
+
+        let selected_thread_index = threads
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, t)| t.messages.last().map(|m| m.ts).unwrap_or(0))
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+
+        let (tx, rx) = channel();
+        let worker_tx = worker::spawn_session_worker_for_slot(s, tx.clone(), ctx.clone(), false);
+        if is_logged_in {
+            let _ = worker_tx.send(WorkerCmd::RefreshThreads);
+        } else {
+            let _ = worker_tx.send(WorkerCmd::RequestQr);
+        }
+
+        AccountRuntimeSlot {
+            slot_id,
+            is_logged_in,
+            user_name,
+            user_uin,
+            user_avatar,
+            threads,
+            selected_thread_index,
+            unread_counts: HashMap::new(),
+            friend_status_map: HashMap::new(),
+            checking_friend_status: HashSet::new(),
+            qr_texture: None,
+            qr_status: "Đang tạo mã QR đăng nhập…".into(),
+            login_in_progress: false,
+            login_status_msg: String::new(),
+            status_msg: "Trực tuyến · Sẵn sàng".into(),
+            event_rx: rx,
+            event_tx: tx,
+            worker_tx,
+        }
+    }
+
+    pub(super) fn save_accounts_registry(&self) {
+        let mut slots: Vec<usize> = self
+            .background_accounts
+            .iter()
+            .map(|a| a.slot_id)
+            .collect();
+        slots.push(self.active_account_slot);
+        slots.sort_unstable();
+        slots.dedup();
+        crate::paths::save_accounts_index(&crate::paths::AccountsIndex {
+            slots,
+            active_slot: self.active_account_slot,
+        });
+    }
+
+    /// Summary of all account slots sorted by `slot_id`:
+    /// `(slot_id, display_name, avatar, is_logged_in, unread_count, is_active)`.
+    pub(super) fn all_accounts_summary(
+        &self,
+    ) -> Vec<(usize, String, Option<String>, bool, usize, bool)> {
+        let mut list = Vec::with_capacity(self.background_accounts.len() + 1);
+        let cur_unread: usize = self.unread_counts.values().sum();
+        let cur_name = if !self.user_name.is_empty() {
+            self.user_name.clone()
+        } else if self.is_logged_in {
+            format!("Tài khoản #{}", self.active_account_slot + 1)
+        } else {
+            format!("Chưa đăng nhập #{}", self.active_account_slot + 1)
+        };
+        list.push((
+            self.active_account_slot,
+            cur_name,
+            self.user_avatar.clone(),
+            self.is_logged_in,
+            cur_unread,
+            true,
+        ));
+
+        for bg in &self.background_accounts {
+            let u_cnt: usize = bg.unread_counts.values().sum();
+            let b_name = if !bg.user_name.is_empty() {
+                bg.user_name.clone()
+            } else if bg.is_logged_in {
+                format!("Tài khoản #{}", bg.slot_id + 1)
+            } else {
+                format!("Chưa đăng nhập #{}", bg.slot_id + 1)
+            };
+            list.push((
+                bg.slot_id,
+                b_name,
+                bg.user_avatar.clone(),
+                bg.is_logged_in,
+                u_cnt,
+                false,
+            ));
+        }
+        list.sort_by_key(|x| x.0);
+        list
+    }
+
+    pub(super) fn total_unread_all_accounts(&self) -> usize {
+        let active_u: usize = self.unread_counts.values().sum();
+        let bg_u: usize = self
+            .background_accounts
+            .iter()
+            .map(|b| b.unread_counts.values().sum::<usize>())
+            .sum();
+        active_u + bg_u
+    }
+
+    /// O(1) zero-latency switch between running Zalo account slots.
+    pub(super) fn switch_to_account(&mut self, target_slot: usize) {
+        if target_slot == self.active_account_slot {
+            return;
+        }
+        let Some(pos) = self
+            .background_accounts
+            .iter()
+            .position(|a| a.slot_id == target_slot)
+        else {
+            return;
+        };
+        let bg = &mut self.background_accounts[pos];
+        std::mem::swap(&mut self.active_account_slot, &mut bg.slot_id);
+        std::mem::swap(&mut self.is_logged_in, &mut bg.is_logged_in);
+        std::mem::swap(&mut self.user_name, &mut bg.user_name);
+        std::mem::swap(&mut self.user_uin, &mut bg.user_uin);
+        std::mem::swap(&mut self.user_avatar, &mut bg.user_avatar);
+        std::mem::swap(&mut self.threads, &mut bg.threads);
+        std::mem::swap(&mut self.selected_thread_index, &mut bg.selected_thread_index);
+        std::mem::swap(&mut self.unread_counts, &mut bg.unread_counts);
+        std::mem::swap(&mut self.friend_status_map, &mut bg.friend_status_map);
+        std::mem::swap(
+            &mut self.checking_friend_status,
+            &mut bg.checking_friend_status,
+        );
+        std::mem::swap(&mut self.qr_texture, &mut bg.qr_texture);
+        std::mem::swap(&mut self.qr_status, &mut bg.qr_status);
+        std::mem::swap(&mut self.login_in_progress, &mut bg.login_in_progress);
+        std::mem::swap(&mut self.login_status_msg, &mut bg.login_status_msg);
+        std::mem::swap(&mut self.status_msg, &mut bg.status_msg);
+        std::mem::swap(&mut self.event_rx, &mut bg.event_rx);
+        std::mem::swap(&mut self.event_tx, &mut bg.event_tx);
+        std::mem::swap(&mut self.active_worker_tx, &mut bg.worker_tx);
+
+        WORKER_TX.set(self.active_worker_tx.clone());
+        self.replying_to = None;
+        self.in_chat_search_open = false;
+        self.profile_menu_open = false;
+        self.mobile_chat_open = false;
+        self.save_accounts_registry();
+
+        let label = if !self.user_name.is_empty() {
+            self.user_name.clone()
+        } else {
+            format!("Tài khoản #{}", self.active_account_slot + 1)
+        };
+        self.show_toast(format!("Đã chuyển sang {label}"));
+    }
+
+    /// Create and switch to a new parallel Zalo account slot (`+ Thêm tài khoản`).
+    pub(super) fn add_new_account_slot(&mut self, ctx: &egui::Context) {
+        let mut next_slot = 1usize;
+        while next_slot == self.active_account_slot
+            || self.background_accounts.iter().any(|a| a.slot_id == next_slot)
+        {
+            next_slot += 1;
+        }
+        let slot = Self::spawn_account_slot(next_slot, self.dev_mode, ctx);
+        self.background_accounts.push(slot);
+        self.switch_to_account(next_slot);
+        self.show_toast(format!(
+            "Đã tạo Hồ sơ Tài khoản #{} — Quét QR hoặc nhập SĐT để đăng nhập song song",
+            next_slot + 1
+        ));
+    }
+
+    /// Remove a secondary account slot (`slot_id >= 1`) and clean up its profile directory.
+    pub(super) fn remove_account_slot(&mut self, target_slot: usize) {
+        if target_slot == 0 {
+            return;
+        }
+        if self.active_account_slot == target_slot {
+            let _ = self.active_worker_tx.send(WorkerCmd::Logout);
+            self.switch_to_account(0);
+        }
+        if let Some(pos) = self
+            .background_accounts
+            .iter()
+            .position(|a| a.slot_id == target_slot)
+        {
+            let removed = self.background_accounts.remove(pos);
+            let _ = removed.worker_tx.send(WorkerCmd::Logout);
+        }
+        let dir = crate::paths::profile_dir_for_slot(target_slot);
+        if target_slot > 0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        self.save_accounts_registry();
+        self.show_toast(format!("Đã xóa Hồ sơ Tài khoản #{}", target_slot + 1));
+    }
+
+    fn check_background_account_events(&mut self, ctx: &egui::Context) {
+        let mut pending_toasts: Vec<String> = Vec::new();
+        let mut new_alert = false;
+
+        for bg in &mut self.background_accounts {
+            while let Ok(event) = bg.event_rx.try_recv() {
+                match event {
+                    GuiEvent::QrReady { qr_image, .. } => {
+                        bg.qr_texture = Some(ctx.load_texture(
+                            format!("qr_code_tex_slot_{}", bg.slot_id),
+                            qr_image,
+                            TextureOptions::NEAREST,
+                        ));
+                        bg.qr_status =
+                            "Mở ứng dụng Zalo trên điện thoại và quét mã QR".into();
+                        bg.login_in_progress = false;
+                    }
+                    GuiEvent::QrScanned { name } => {
+                        bg.qr_status = format!(
+                            "Đã quét bởi {name} — Vui lòng bấm 'Đăng nhập' trên điện thoại…"
+                        );
+                    }
+                    GuiEvent::LoginSuccess { name, uin, avatar } => {
+                        bg.is_logged_in = true;
+                        bg.user_name = name.clone();
+                        bg.user_uin = uin;
+                        if avatar.is_some() {
+                            bg.user_avatar = avatar;
+                        }
+                        bg.login_in_progress = false;
+                        bg.status_msg = "Trực tuyến · Đồng bộ thời gian thực".into();
+                        pending_toasts.push(format!("✓ Đã đăng nhập tài khoản phụ: {name}"));
+                    }
+                    GuiEvent::LoginFailed(err) => {
+                        bg.login_in_progress = false;
+                        bg.login_status_msg = format!("Lỗi đăng nhập: {err}");
+                    }
+                    GuiEvent::ThreadsUpdated(updates) => {
+                        if bg.is_logged_in && !updates.is_empty() {
+                            let live_ids: HashSet<String> = updates
+                                .iter()
+                                .filter(|u| !u.id.is_empty() && u.id != "0")
+                                .map(|u| u.id.clone())
+                                .collect();
+                            let mut bg_inc_total = 0usize;
+                            for nt in updates {
+                                if let Some(existing) =
+                                    bg.threads.iter_mut().find(|t| t.id == nt.id)
+                                {
+                                    let old_len = existing.messages.len();
+                                    crate::chat::merge_thread_into(existing, nt, true);
+                                    let added = existing.messages.len().saturating_sub(old_len);
+                                    if added > 0 {
+                                        let inc_cnt = existing
+                                            .messages
+                                            .iter()
+                                            .rev()
+                                            .take(added)
+                                            .filter(|m| !m.is_outgoing)
+                                            .count();
+                                        if inc_cnt > 0 {
+                                            *bg.unread_counts
+                                                .entry(existing.id.clone())
+                                                .or_insert(0) += inc_cnt;
+                                            bg_inc_total += inc_cnt;
+                                        }
+                                    }
+                                } else if let Some(existing) = bg.threads.iter_mut().find(|t| {
+                                    !live_ids.contains(&t.id)
+                                        && crate::chat::threads_represent_same_contact(t, &nt)
+                                }) {
+                                    crate::chat::merge_thread_into(existing, nt, true);
+                                } else if !nt.id.is_empty() && nt.id != "0" {
+                                    bg.threads.push(nt);
+                                }
+                            }
+                            crate::chat::deduplicate_threads(&mut bg.threads, Some(&live_ids));
+                            let _ = bg
+                                .worker_tx
+                                .send(WorkerCmd::PersistThreads(bg.threads.clone()));
+                            if bg_inc_total > 0 {
+                                let acc_lbl = if bg.user_name.is_empty() {
+                                    format!("TK #{}", bg.slot_id + 1)
+                                } else {
+                                    bg.user_name.clone()
+                                };
+                                pending_toasts.push(format!(
+                                    "📩 [{acc_lbl}] Có {bg_inc_total} tin nhắn mới"
+                                ));
+                                new_alert = true;
+                            }
+                        }
+                    }
+                    GuiEvent::StickerImageReady { key, image } => {
+                        self.loading_stickers.remove(&key);
+                        let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
+                        self.sticker_textures.insert(key, tex);
+                    }
+                    GuiEvent::IncomingCall { caller_name, .. } => {
+                        let acc_lbl = if bg.user_name.is_empty() {
+                            format!("TK #{}", bg.slot_id + 1)
+                        } else {
+                            bg.user_name.clone()
+                        };
+                        pending_toasts.push(format!(
+                            "📞 [{acc_lbl}] Cuộc gọi đến từ {caller_name} — Bấm chuyển tài khoản để nghe!"
+                        ));
+                        new_alert = true;
+                    }
+                    GuiEvent::SessionExpired(reason) => {
+                        bg.is_logged_in = false;
+                        bg.qr_texture = None;
+                        bg.qr_status = reason;
+                    }
+                    GuiEvent::LoggedOut => {
+                        bg.is_logged_in = false;
+                        bg.user_name.clear();
+                        bg.user_uin.clear();
+                        bg.threads.clear();
+                        bg.qr_texture = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if new_alert && self.settings.enable_notifications {
+            let total_unread = self.total_unread_all_accounts();
+            let title = if total_unread > 0 {
+                format!("({total_unread}) Zalo")
+            } else {
+                "Zalo".to_string()
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+        for msg in pending_toasts {
+            self.show_toast(msg);
         }
     }
 
@@ -1131,19 +1566,35 @@ impl eframe::App for ZaloGuiApp {
         }
 
         self.check_events(ctx);
+        self.check_background_account_events(ctx);
 
         // Non-overlapping long-poll trigger; wakes only every 1.2s to keep idle CPU ~0%
-        if self.is_logged_in && self.last_poll.elapsed() >= Duration::from_millis(1200) {
+        if self.last_poll.elapsed() >= Duration::from_millis(1200) {
             self.last_poll = std::time::Instant::now();
-            if let Some(tx) = WORKER_TX.get() {
-                let known: Vec<(String, String, bool)> = self
-                    .threads
-                    .iter()
-                    .map(|t| (t.id.clone(), t.name.clone(), t.is_group))
-                    .collect();
-                let _ = tx.send(WorkerCmd::PollMessages {
-                    known_threads: known,
-                });
+            if self.is_logged_in {
+                if let Some(tx) = WORKER_TX.get() {
+                    let known: Vec<(String, String, bool)> = self
+                        .threads
+                        .iter()
+                        .map(|t| (t.id.clone(), t.name.clone(), t.is_group))
+                        .collect();
+                    let _ = tx.send(WorkerCmd::PollMessages {
+                        known_threads: known,
+                    });
+                }
+            }
+            // Also poll all logged-in secondary accounts in parallel
+            for bg in &self.background_accounts {
+                if bg.is_logged_in {
+                    let known: Vec<(String, String, bool)> = bg
+                        .threads
+                        .iter()
+                        .map(|t| (t.id.clone(), t.name.clone(), t.is_group))
+                        .collect();
+                    let _ = bg.worker_tx.send(WorkerCmd::PollMessages {
+                        known_threads: known,
+                    });
+                }
             }
         }
 
@@ -1151,8 +1602,11 @@ impl eframe::App for ZaloGuiApp {
 
         let pal = self.palette();
 
-        Self::handle_frameless_resize(ctx);
-        self.render_custom_title_bar(ctx, &pal);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            Self::handle_frameless_resize(ctx);
+            self.render_custom_title_bar(ctx, &pal);
+        }
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {
             egui::TopBottomPanel::bottom("dev_inspector")
@@ -1511,7 +1965,73 @@ impl ZaloGuiApp {
                             self.theme_dirty = true;
                         }
 
-                        buttons_left_x = th_rect.left();
+                        // Mobile Touch UI Toggle Pill (Resize & test iOS/Android 1-column layout)
+                        let mob_lbl = if self.mobile_view_mode {
+                            "📱 Mobile (Đang bật)"
+                        } else {
+                            "📱 Mobile UI"
+                        };
+                        let mob_btn = egui::Button::new(
+                            RichText::new(mob_lbl)
+                                .size(11.0)
+                                .color(if self.mobile_view_mode {
+                                    Color32::WHITE
+                                } else {
+                                    pal.text_secondary
+                                })
+                                .strong(),
+                        )
+                        .fill(if self.mobile_view_mode {
+                            pal.primary
+                        } else {
+                            pal.bg_elevated
+                        })
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .rounding(Rounding::same(5.0));
+                        ui.add_space(4.0);
+                        let mob_r = ui
+                            .add(mob_btn)
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text(
+                                "Chuyển đổi chế độ Giao diện Điện thoại (iOS / Android 1 cột cảm ứng)",
+                            );
+                        if mob_r.clicked() {
+                            self.mobile_view_mode = !self.mobile_view_mode;
+                            if self.mobile_view_mode {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                                    412.0, 760.0,
+                                )));
+                            } else {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                                    1020.0, 700.0,
+                                )));
+                            }
+                        }
+
+                        // Multi-Account Quick Add / Switcher Pill
+                        let add_acc_btn = egui::Button::new(
+                            RichText::new(format!(
+                                "+ TK ({})",
+                                self.background_accounts.len() + 1
+                            ))
+                            .size(11.0)
+                            .color(pal.primary_hover)
+                            .strong(),
+                        )
+                        .fill(pal.primary.linear_multiply(0.14))
+                        .stroke(Stroke::new(1.0_f32, pal.primary.linear_multiply(0.5)))
+                        .rounding(Rounding::same(5.0));
+                        ui.add_space(4.0);
+                        let add_r = ui
+                            .add(add_acc_btn)
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text(
+                                "Thêm tài khoản Zalo thứ 2 chạy song song (Multi-Account)",
+                            );
+                        buttons_left_x = add_r.rect.left() - 6.0;
+                        if add_r.clicked() {
+                            self.add_new_account_slot(ctx);
+                        }
 
                         if !self.is_logged_in && !self.threads.is_empty() {
                             ui.add_space(8.0);
@@ -1554,15 +2074,95 @@ impl ZaloGuiApp {
     }
 
     fn render_login_screen(&mut self, ui: &mut egui::Ui, pal: &ThemePalette) {
+        let mut switch_slot_req: Option<usize> = None;
+        let mut remove_slot_req: Option<usize> = None;
+
         ui.vertical_centered(|ui| {
             let avail_h = ui.available_height();
-            ui.add_space((avail_h * 0.08).max(20.0));
+            ui.add_space((avail_h * 0.05).max(14.0));
+
+            // If multiple account slots exist, render a switcher bar so the user can return to
+            // an already logged-in account or remove an unused secondary slot.
+            if !self.background_accounts.is_empty() {
+                let summary = self.all_accounts_summary();
+                egui::Frame::none()
+                    .fill(pal.bg_elevated)
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .rounding(Rounding::same(10.0))
+                    .inner_margin(Margin::symmetric(12.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Tài khoản:")
+                                    .size(12.0)
+                                    .color(pal.text_secondary)
+                                    .strong(),
+                            );
+                            for (slot_id, name, _ava, logged_in, unread, is_active) in summary {
+                                let badge = if unread > 0 {
+                                    format!("{name} ({unread})")
+                                } else if logged_in {
+                                    format!("● {name}")
+                                } else {
+                                    name
+                                };
+                                let btn = egui::Button::new(
+                                    RichText::new(badge)
+                                        .size(11.8)
+                                        .color(if is_active {
+                                            Color32::WHITE
+                                        } else {
+                                            pal.text_primary
+                                        })
+                                        .strong(),
+                                )
+                                .fill(if is_active {
+                                    pal.primary
+                                } else {
+                                    pal.bg_input
+                                })
+                                .rounding(Rounding::same(6.0));
+                                if ui
+                                    .add(btn)
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .clicked()
+                                    && !is_active
+                                {
+                                    switch_slot_req = Some(slot_id);
+                                }
+                            }
+                            if self.active_account_slot > 0 {
+                                let del_btn = egui::Button::new(
+                                    RichText::new(format!("{} Hủy TK #{}", lucide::X, self.active_account_slot + 1))
+                                        .size(11.2)
+                                        .color(pal.danger),
+                                )
+                                .fill(pal.danger.linear_multiply(0.12))
+                                .rounding(Rounding::same(6.0));
+                                if ui
+                                    .add(del_btn)
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    remove_slot_req = Some(self.active_account_slot);
+                                }
+                            }
+                        });
+                    });
+                ui.add_space(10.0);
+            }
+
             if let Some(tex) = &self.app_logo_texture {
                 ui.image((tex.id(), Vec2::new(64.0, 64.0)));
                 ui.add_space(10.0);
             }
+            let login_title = if self.active_account_slot == 0 {
+                "Đăng nhập Zalo".to_string()
+            } else {
+                format!("Đăng nhập Tài khoản #{}", self.active_account_slot + 1)
+            };
             ui.label(
-                RichText::new("Đăng nhập Zalo")
+                RichText::new(login_title)
                     .color(pal.primary)
                     .size(26.0)
                     .strong(),
@@ -1763,6 +2363,13 @@ impl ZaloGuiApp {
                     });
                 });
         });
+
+        if let Some(s) = switch_slot_req {
+            self.switch_to_account(s);
+        }
+        if let Some(r) = remove_slot_req {
+            self.remove_account_slot(r);
+        }
     }
 
     fn show_toast(&mut self, msg: impl Into<String>) {

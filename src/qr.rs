@@ -321,10 +321,11 @@ pub async fn login_via_qr(s: &mut Session, language: &str) -> Result<Value> {
         login::apply_login_config(s, cfg);
         s.apply_server_info(cfg);
         println!("✓ Đã nạp khoá phiên zpw_enk và cập nhật endpoints!");
-        if let Err(e) = s.save_to_file("session.json") {
-            eprintln!("! Lỗi lưu session.json: {e}");
+        let session_path = s.session_file_path();
+        if let Err(e) = s.save_to_file(&session_path) {
+            eprintln!("! Lỗi lưu {session_path}: {e}");
         } else {
-            println!("✓ Đã lưu phiên vào session.json (tự động khôi phục cho các lần chạy sau)");
+            println!("✓ Đã lưu phiên vào {session_path} (tự động khôi phục cho các lần chạy sau)");
         }
     } else {
         bail!("getLoginInfo không trả về data: {info}");

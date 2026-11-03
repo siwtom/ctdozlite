@@ -327,9 +327,15 @@ pub fn deduplicate_threads(
     *threads = merged;
 }
 
-/// Load locally cached conversations and message history.
+/// Load locally cached conversations and message history for the default account slot (`0`).
 pub fn load_threads_cache() -> Vec<Thread> {
-    if let Ok(text) = std::fs::read_to_string("threads_cache.json") {
+    load_threads_cache_for_slot(0)
+}
+
+/// Load locally cached conversations and message history for a specific account slot.
+pub fn load_threads_cache_for_slot(slot: usize) -> Vec<Thread> {
+    let path = crate::paths::threads_cache_for_slot(slot);
+    if let Ok(text) = std::fs::read_to_string(path) {
         if let Ok(mut threads) = serde_json::from_str::<Vec<Thread>>(&text) {
             deduplicate_threads(&mut threads, None);
             return threads;
@@ -338,10 +344,16 @@ pub fn load_threads_cache() -> Vec<Thread> {
     Vec::new()
 }
 
-/// Persist conversations and message history locally so they survive app restarts.
+/// Persist conversations and message history locally for the default account slot (`0`).
 pub fn save_threads_cache(threads: &[Thread]) {
+    save_threads_cache_for_slot(0, threads);
+}
+
+/// Persist conversations and message history locally for a specific account slot.
+pub fn save_threads_cache_for_slot(slot: usize, threads: &[Thread]) {
+    let path = crate::paths::threads_cache_for_slot(slot);
     if let Ok(text) = serde_json::to_string_pretty(threads) {
-        let _ = std::fs::write("threads_cache.json", text);
+        let _ = std::fs::write(path, text);
     }
 }
 
@@ -438,7 +450,7 @@ pub async fn get_friends(s: &Session) -> Result<Vec<Thread>> {
     }
 
     // Hydrate with locally persisted history from SQLite (`zalo_history.db`)
-    crate::store::load_history_into_threads("zalo_history.db", &mut threads, 200);
+    crate::store::load_history_into_threads(&s.history_db_path(), &mut threads, 200);
     resolve_thread_names(s, &mut threads).await;
 
     Ok(threads)
@@ -3023,10 +3035,10 @@ pub async fn poll_new_messages(
     resolve_thread_names(s, threads).await;
     threads.retain(|t| !t.messages.is_empty() || !t.name.starts_with("Người dùng "));
     deduplicate_threads(threads, None);
-    if let Ok(mut store) = crate::store::MessageStore::open("zalo_history.db") {
+    if let Ok(mut store) = crate::store::MessageStore::open(&s.history_db_path()) {
         let _ = crate::store::persist_threads(&mut store, threads);
     }
-    save_threads_cache(threads);
+    save_threads_cache_for_slot(s.profile_slot, threads);
     Ok(())
 }
 
