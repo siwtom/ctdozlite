@@ -40,7 +40,8 @@ async fn main() -> Result<()> {
     let dump_raw = args.iter().any(|a| a == "--dump-raw");
     let force_tui = args.iter().any(|a| a == "--tui");
     let force_gui = args.iter().any(|a| a == "--gui");
-    let force_mobile = args.iter().any(|a| a == "--mobile");
+    let force_mobile =
+        args.iter().any(|a| a == "--mobile") || cfg!(any(target_os = "ios", target_os = "android"));
     let force_qr = args.iter().any(|a| a == "--qr");
     let force_logout = args.iter().any(|a| a == "--logout");
 
@@ -104,18 +105,21 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        let initial_size = if force_mobile {
-            [412.0, 820.0]
-        } else {
-            [1020.0, 700.0]
-        };
-        let mut viewport = eframe::egui::ViewportBuilder::default()
-            .with_decorations(false)
-            .with_inner_size(initial_size)
-            .with_min_inner_size([360.0, 360.0])
-            .with_title("Zalo");
-        if let Some(icon) = gui::load_app_icon() {
-            viewport = viewport.with_icon(std::sync::Arc::new(icon));
+        let mut viewport = eframe::egui::ViewportBuilder::default().with_title("Zalo");
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        {
+            let initial_size = if force_mobile {
+                [412.0, 820.0]
+            } else {
+                [1020.0, 700.0]
+            };
+            viewport = viewport
+                .with_decorations(false)
+                .with_inner_size(initial_size)
+                .with_min_inner_size([360.0, 360.0]);
+            if let Some(icon) = gui::load_app_icon() {
+                viewport = viewport.with_icon(std::sync::Arc::new(icon));
+            }
         }
         let native_options = eframe::NativeOptions {
             viewport,

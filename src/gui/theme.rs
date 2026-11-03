@@ -529,49 +529,21 @@ pub(super) fn setup_custom_fonts(ctx: &egui::Context) {
         egui::FontData::from_static(LUCIDE_BYTES),
     );
 
-    // 2. Load system Vietnamese sans-serif font (Windows, macOS, Linux, Android, iOS)
-    let font_candidates = [
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "C:\\Windows\\Fonts\\tahoma.ttf",
-        "/system/fonts/Roboto-Regular.ttf",
-        "/system/fonts/NotoSans-Regular.ttf",
-        "/system/fonts/DroidSans.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Tahoma.ttf",
-        "/System/Library/Fonts/Core/Arial.ttf",
-        "/Library/Fonts/Arial.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ];
-
-    for path in font_candidates {
-        if let Ok(font_data) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "vietnamese_font".to_owned(),
-                egui::FontData::from_owned(font_data),
-            );
-            break;
-        }
-    }
+    // 2. Embed full Vietnamese sans-serif font directly into the binary so iOS, Android,
+    // Windows, macOS, and Linux always render Vietnamese diacritics crisply inside any sandbox.
+    const VIETNAMESE_BYTES: &[u8] = include_bytes!("../assets/fonts/vietnamese.ttf");
+    fonts.font_data.insert(
+        "vietnamese_font".to_owned(),
+        egui::FontData::from_static(VIETNAMESE_BYTES),
+    );
 
     // Fallback order: Proportional text prefers Vietnamese sans, then Lucide for icon glyphs
     let prop = fonts.families.entry(egui::FontFamily::Proportional).or_default();
-    if fonts.font_data.contains_key("vietnamese_font") {
-        prop.insert(0, "vietnamese_font".to_owned());
-        prop.push("lucide_font".to_owned());
-    } else {
-        prop.insert(0, "lucide_font".to_owned());
-    }
+    prop.insert(0, "vietnamese_font".to_owned());
+    prop.push("lucide_font".to_owned());
 
     let mono = fonts.families.entry(egui::FontFamily::Monospace).or_default();
-    if fonts.font_data.contains_key("vietnamese_font") {
-        mono.push("vietnamese_font".to_owned());
-    }
+    mono.insert(0, "vietnamese_font".to_owned());
     mono.push("lucide_font".to_owned());
 
     ctx.set_fonts(fonts);

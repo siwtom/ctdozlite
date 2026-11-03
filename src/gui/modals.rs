@@ -17,9 +17,14 @@ impl ZaloGuiApp {
         let mut remove_slot: Option<usize> = None;
         let accounts_summary = self.all_accounts_summary();
 
+        let popover_pos = if cfg!(any(target_os = "android", target_os = "ios")) || self.mobile_view_mode {
+            Pos2::new(56.0, 86.0)
+        } else {
+            Pos2::new(68.0, 44.0)
+        };
         let area_resp = egui::Area::new(Id::new("left_rail_profile_popover"))
             .order(egui::Order::Foreground)
-            .fixed_pos(Pos2::new(68.0, 44.0))
+            .fixed_pos(popover_pos)
             .show(ctx, |ui| {
                 egui::Frame::none()
                     .fill(pal.bg_elevated)
@@ -694,8 +699,19 @@ impl ZaloGuiApp {
 
         let mut open = true;
         let screen = ctx.screen_rect();
-        let win_w = (screen.width() * 0.88).clamp(620.0, 780.0);
-        let win_h = (screen.height() * 0.82).clamp(480.0, 600.0);
+        let is_mob_settings = cfg!(any(target_os = "android", target_os = "ios"))
+            || self.mobile_view_mode
+            || screen.width() < 580.0;
+        let win_w = if is_mob_settings {
+            (screen.width() - 20.0).max(280.0)
+        } else {
+            (screen.width() * 0.88).clamp(620.0, 780.0)
+        };
+        let win_h = if is_mob_settings {
+            (screen.height() * 0.78).clamp(320.0, 620.0)
+        } else {
+            (screen.height() * 0.82).clamp(480.0, 600.0)
+        };
 
         let mut theme_switched = false;
         let mut trigger_sync = false;
@@ -719,7 +735,8 @@ impl ZaloGuiApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
 
-                    // Left Tabs Navigation Sidebar (200px)
+                    // Left Tabs Navigation Sidebar (200px on desktop, hidden on mobile)
+                    if !is_mob_settings {
                     egui::Frame::none()
                         .fill(pal.bg_sidebar)
                         .inner_margin(Margin::symmetric(10.0, 16.0))
@@ -800,15 +817,60 @@ impl ZaloGuiApp {
                                 }
                             });
                         });
+                    }
 
                     // Right Content Panel
-                    let content_w = win_w - 220.0;
+                    let content_w = if is_mob_settings {
+                        (win_w - 28.0).max(240.0)
+                    } else {
+                        win_w - 220.0
+                    };
                     egui::Frame::none()
                         .fill(pal.bg_chat_canvas)
-                        .inner_margin(Margin::symmetric(24.0, 16.0))
+                        .inner_margin(Margin::symmetric(if is_mob_settings { 14.0 } else { 24.0 }, 16.0))
                         .show(ui, |ui| {
                             ui.set_width(content_w);
                             ui.set_height(win_h - 32.0);
+
+                            if is_mob_settings {
+                                egui::ScrollArea::horizontal()
+                                    .id_salt("mobile_settings_tabs_scroll")
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            for (tab, title) in [
+                                                (SettingsTab::General, "Chung"),
+                                                (SettingsTab::Appearance, "Giao diện"),
+                                                (SettingsTab::Sync, "Đồng bộ"),
+                                                (SettingsTab::Privacy, "Riêng tư"),
+                                                (SettingsTab::Notifications, "Thông báo"),
+                                                (SettingsTab::Messages, "Tin nhắn"),
+                                                (SettingsTab::Utilities, "Tiện ích"),
+                                            ] {
+                                                let active = self.settings_tab == tab;
+                                                let b = egui::Button::new(
+                                                    RichText::new(title)
+                                                        .size(11.8)
+                                                        .color(if active {
+                                                            Color32::WHITE
+                                                        } else {
+                                                            pal.text_secondary
+                                                        })
+                                                        .strong(),
+                                                )
+                                                .fill(if active {
+                                                    pal.primary
+                                                } else {
+                                                    pal.bg_elevated
+                                                })
+                                                .rounding(Rounding::same(6.0));
+                                                if ui.add(b).clicked() {
+                                                    self.settings_tab = tab;
+                                                }
+                                            }
+                                        });
+                                    });
+                                ui.add_space(6.0);
+                            }
 
                             ui.horizontal(|ui| {
                                 let tab_title = match self.settings_tab {
