@@ -31,6 +31,12 @@ if (-not (Get-Command cargo-apk -ErrorAction SilentlyContinue)) {
 # 3. Build release APK
 Push-Location "$PSScriptRoot\..\.."
 try {
+    if (-not (Test-Path "packaging\android\release.keystore")) {
+        keytool -genkeypair -v -keystore "packaging\android\release.keystore" `
+            -alias androidreleasekey -keyalg RSA -keysize 2048 -validity 10000 `
+            -storepass ctdozlite_release_key -keypass ctdozlite_release_key `
+            -dname "CN=CTDO Zalo Lite, OU=Mobile, O=CTDO, L=HN, S=HN, C=VN"
+    }
     cargo apk build --release --lib
     Write-Host "`n✓ APK built successfully:" -ForegroundColor Green
     Write-Host "  target\release\apk\ctdozlite.apk" -ForegroundColor Green

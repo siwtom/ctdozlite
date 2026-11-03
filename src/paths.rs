@@ -53,9 +53,12 @@ pub fn app_data_dir() -> PathBuf {
     {
         let fallback = PathBuf::from("/data/user/0/net.ctdo.ctdozlite/files");
         let _ = std::fs::create_dir_all(&fallback);
-        return fallback;
+        fallback
     }
-    PathBuf::from(".")
+    #[cfg(not(target_os = "android"))]
+    {
+        PathBuf::from(".")
+    }
 }
 
 /// Directory for a specific account slot (`0` = root app data dir, `>= 1` = `profiles/account_{slot}`).

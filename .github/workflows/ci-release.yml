@@ -296,6 +296,12 @@ jobs:
           if [ ! -d "$ANDROID_HOME/platforms/android-34" ]; then
             yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
           fi
+          if [ ! -f "packaging/android/release.keystore" ]; then
+            keytool -genkeypair -v -keystore packaging/android/release.keystore \
+              -alias androidreleasekey -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass ctdozlite_release_key -keypass ctdozlite_release_key \
+              -dname "CN=CTDO Zalo Lite, OU=Mobile, O=CTDO, L=HN, S=HN, C=VN"
+          fi
           cargo apk build --release --lib
           mkdir -p dist
           cp target/release/apk/*.apk dist/ctdozlite-0.0.1-android-arm64.apk
